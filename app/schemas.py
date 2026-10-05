@@ -1,6 +1,26 @@
 import datetime as dt
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
+
+
+class NewsTier(StrEnum):
+    """How broad a news search is: about the company, its industry, or the whole market."""
+
+    COMPANY = "company"
+    INDUSTRY = "industry"
+    MACRO = "macro"
+
+
+class Article(BaseModel):
+    """A news article found by Exa. Only highlights are kept, never the full text."""
+
+    url: str
+    title: str | None = None
+    published_at: dt.datetime | None = Field(
+        default=None, description="Publication time (UTC) when Exa knows it"
+    )
+    highlights: list[str] = Field(default_factory=list)
 
 
 class TickerInfo(BaseModel):
