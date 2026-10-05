@@ -10,7 +10,7 @@ def test_upgrade_head_on_empty_db(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path / 'migrate.db'}"
     run_migrations(url)
     tables = inspect(create_engine(url)).get_table_names()
-    assert tables == ["alembic_version"]
+    assert set(tables) == {"alembic_version", "tickers", "prices"}
 
 
 def test_models_match_migrations(tmp_path: Path) -> None:

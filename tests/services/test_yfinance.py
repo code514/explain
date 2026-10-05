@@ -114,10 +114,21 @@ async def test_rate_limit_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_get_info() -> None:
-    FakeTicker.info = {"longName": "NVIDIA Corporation", "sector": "Technology"}
+    FakeTicker.info = {
+        "quoteType": "EQUITY",
+        "longName": "NVIDIA Corporation",
+        "sector": "Technology",
+    }
 
     info = await yf_service.get_info("NVDA")
 
     assert info.name == "NVIDIA Corporation"
     assert info.sector == "Technology"
     assert info.industry is None
+
+
+async def test_get_info_unknown_ticker() -> None:
+    FakeTicker.info = {"trailingPegRatio": None}  # what yfinance returns for an unknown symbol
+
+    with pytest.raises(yf_service.UnknownTickerError):
+        await yf_service.get_info("BOGUS")

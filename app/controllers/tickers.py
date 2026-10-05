@@ -1,9 +1,10 @@
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 import pandas as pd
 
 from app.schemas import Move, MovesResponse
+from app.services import cache
 from app.services import yfinance as yf_service
 
 DEFAULT_RANGE = timedelta(days=365)
@@ -14,7 +15,7 @@ PREVIOUS_CLOSE_LOOKBACK = timedelta(days=7)
 
 
 class TickerNotFoundError(Exception):
-    """Yahoo has no price data for the ticker in the requested range."""
+    """Yahoo doesn't know the ticker, or has no price data for it in the requested range."""
 
 
 class InvalidDateRangeError(Exception):
@@ -22,20 +23,53 @@ class InvalidDateRangeError(Exception):
 
 
 async def get_moves(ticker: str, start: date | None, end: date | None) -> MovesResponse:
-    """`end` defaults to today and `start` to a year before `end`."""
+    """`end` defaults to yesterday and `start` to a year before `end`.
+
+    Today and the future are never fetched or cached: today's bar isn't final, and a cached null
+    for a day Yahoo hasn't published yet would never be refreshed. `end` is clamped to yesterday.
+    """
     ticker = ticker.upper()
-    end = end or date.today()
+    yesterday = date.today() - timedelta(days=1)
+    end = min(end or yesterday, yesterday)
     start = start or end - DEFAULT_RANGE
     if start > end:
         raise InvalidDateRangeError(f"start {start} is after end {end}")
-    history = await yf_service.get_history(ticker, start - PREVIOUS_CLOSE_LOOKBACK, end)
-    if history.empty:
+    await _ensure_ticker_info(ticker)
+    history = await _get_history(ticker, start - PREVIOUS_CLOSE_LOOKBACK, end)
+    if history.empty or bool(history["close"].isna().all()):
         raise TickerNotFoundError(ticker)
     # Interim shim until move detection lives in domain/stocks.py: every trading day in the
     # requested range is reported. The lookback rows only supply the first previous close.
-    daily_returns = history["close"].pct_change().loc[pd.Timestamp(start) :].dropna()
+    # Days without trading are null rows, so returns compare each trading day with the previous one.
+    daily_returns = history["close"].dropna().pct_change().loc[pd.Timestamp(start) :].dropna()
     moves = [
         Move(date=cast(pd.Timestamp, day).date(), daily_return=daily_return)
         for day, daily_return in zip(daily_returns.index, daily_returns.to_list(), strict=True)
     ]
     return MovesResponse(ticker=ticker, start=start, end=end, moves=moves)
+
+
+async def _ensure_ticker_info(ticker: str) -> None:
+    """Fetch the company metadata from Yahoo and cache it, unless it is already cached."""
+    if cache.get_ticker_info(ticker) is None:
+        try:
+            info = await yf_service.get_info(ticker)
+        except yf_service.UnknownTickerError:
+            raise TickerNotFoundError(ticker) from None
+        cache.save_ticker_info(info, datetime.now(UTC))
+
+
+async def _get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+    """Contiguous daily prices from `start` to `end`, from the cache or else from Yahoo.
+
+    Yahoo only returns trading days. Days without trading (weekends, holidays) are filled with
+    nulls before caching, so the cache can tell a range is complete by its first and last day.
+    """
+    history = cache.get_ticker_history(ticker, start, end)
+    if history is None:
+        history = await yf_service.get_history(ticker, start, end)
+        if history.empty:
+            return history  # unknown ticker: don't cache a range of nulls
+        history = history.reindex(pd.date_range(start, end, freq="D", name="date"))
+        cache.save_ticker_history(ticker, history)
+    return history

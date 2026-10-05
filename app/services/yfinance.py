@@ -28,6 +28,10 @@ BACKOFF_SECONDS = 2.0  # doubles after each rate-limited attempt
 HISTORY_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
+class UnknownTickerError(Exception):
+    """Yahoo has no company with this symbol."""
+
+
 async def get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
     """Daily adjusted OHLCV for one ticker, from `start` to `end` inclusive.
 
@@ -40,8 +44,15 @@ async def get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
 
 
 async def get_info(ticker: str) -> TickerInfo:
-    """Name, sector and industry. Slow and the most rate-limited call, so cache the result."""
+    """Name, sector and industry. Slow and the most rate-limited call, so cache the result.
+
+    Raises `UnknownTickerError` if Yahoo doesn't know the symbol. For those, yfinance doesn't
+    raise: it logs a 404 and returns a near-empty dict, so a missing `quoteType` (EQUITY, ETF,
+    ...) is the signal.
+    """
     raw: dict[str, Any] = await _with_retries(lambda: yf.Ticker(ticker).info)
+    if not raw.get("quoteType"):
+        raise UnknownTickerError(ticker)
     return TickerInfo(
         symbol=ticker,
         name=raw.get("longName") or raw.get("shortName"),
