@@ -7,8 +7,9 @@ from sqlmodel import Session, col, select
 from app.controllers import tickers
 from app.db import get_engine
 from app.models import Price
-from app.schemas import TickerInfo
+from app.schemas import Article, NewsTier, TickerInfo
 from app.services import cache
+from app.services import exa as exa_service
 from app.services import yfinance as yf_service
 
 pytestmark = pytest.mark.usefixtures("db")
@@ -24,6 +25,19 @@ def stub_info(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return TickerInfo(symbol=ticker, name="Test Corp")
 
     monkeypatch.setattr(yf_service, "get_info", fake_get_info)
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def stub_news(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, date, date]]:
+    """Stub `exa_service.search_news`; returns the (query, start, end) of each call."""
+    calls: list[tuple[str, date, date]] = []
+
+    async def fake_search_news(query: str, start: date, end: date) -> list[Article]:
+        calls.append((query, start, end))
+        return [Article(url=f"https://example.com/{end}")]
+
+    monkeypatch.setattr(exa_service, "search_news", fake_search_news)
     return calls
 
 
@@ -288,3 +302,56 @@ async def test_get_ticker_limits_major_moves_to_ten(monkeypatch: pytest.MonkeyPa
 
     assert len(response.moves) == 15
     assert len(response.major_moves) == 10
+
+
+async def test_get_ticker_searches_company_news_around_each_major_move(
+    monkeypatch: pytest.MonkeyPatch, stub_news: list[tuple[str, date, date]]
+) -> None:
+    async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        return _history("2025-02-28", "2025-03-03", "2025-03-04", closes=[100.0, 110.0, 100.0])
+
+    monkeypatch.setattr(yf_service, "get_history", fake_get_history)
+
+    response = await tickers.get_ticker("nvda", date(2025, 3, 3), date(2025, 3, 4))
+
+    query = exa_service.build_query(NewsTier.COMPANY, "Test Corp", "NVDA", None)
+    assert sorted(stub_news) == [
+        (query, date(2025, 3, 1), date(2025, 3, 4)),
+        (query, date(2025, 3, 2), date(2025, 3, 5)),
+    ]
+    assert [move.news[0].url for move in response.major_moves] == [
+        "https://example.com/2025-03-04",
+        "https://example.com/2025-03-05",
+    ]
+
+
+async def test_get_ticker_without_major_moves_makes_no_news_calls(
+    monkeypatch: pytest.MonkeyPatch, stub_news: list[tuple[str, date, date]]
+) -> None:
+    async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        return _history("2025-03-03")
+
+    monkeypatch.setattr(yf_service, "get_history", fake_get_history)
+
+    await tickers.get_ticker("NVDA", date(2025, 3, 1), date(2025, 3, 5))
+
+    assert stub_news == []
+
+
+async def test_get_ticker_returns_empty_news_when_exa_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        return _history("2025-02-28", "2025-03-03", closes=[100.0, 110.0])
+
+    async def failing_search(query: str, start: date, end: date) -> list[Article]:
+        raise exa_service.MissingApiKeyError("Set EXA_API_KEY in .env")
+
+    monkeypatch.setattr(yf_service, "get_history", fake_get_history)
+    monkeypatch.setattr(exa_service, "search_news", failing_search)
+
+    response = await tickers.get_ticker("NVDA", date(2025, 3, 3), date(2025, 3, 3))
+
+    assert [move.date for move in response.major_moves] == [date(2025, 3, 3)]
+    assert response.major_moves[0].news == []
+    assert "Exa news search failed for NVDA" in caplog.text

@@ -1,18 +1,27 @@
+import asyncio
+import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import cast
 
 import pandas as pd
 
 from app.domain import stocks
-from app.schemas import Move, TickerResponse
+from app.schemas import Article, MajorMove, Move, NewsTier, TickerResponse
 from app.services import cache
+from app.services import exa as exa_service
 from app.services import yfinance as yf_service
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_RANGE = timedelta(days=365)
 
 # Fetched before `start` so the first requested day has a previous close to compare with.
 # A calendar week always reaches back past a weekend plus a market holiday.
 PREVIOUS_CLOSE_LOOKBACK = timedelta(days=7)
+
+# News is searched from this long before a move to this long after it.
+NEWS_DAYS_BEFORE = 2
+NEWS_DAYS_AFTER = 1
 
 
 class TickerNotFoundError(Exception):
@@ -49,7 +58,7 @@ async def get_ticker(ticker: str, start: date | None, end: date | None) -> Ticke
     # The lookback rows only supply the first previous close.
     requested = history.loc[pd.Timestamp(start) :]
     moves = _to_moves(cast(pd.Series, requested["daily_return"]).dropna())
-    major_moves = _to_moves(stocks.find_major_moves(requested))
+    major_moves = await _with_news(ticker, stocks.find_major_moves(requested))
     return TickerResponse(moves=moves, major_moves=major_moves)
 
 
@@ -61,6 +70,34 @@ async def _ensure_ticker_info(ticker: str) -> None:
         except yf_service.UnknownTickerError:
             raise TickerNotFoundError(ticker) from None
         cache.save_ticker_info(info, datetime.now(UTC))
+
+
+async def _with_news(ticker: str, daily_returns: pd.Series) -> list[MajorMove]:
+    """One `MajorMove` per day of `daily_returns`, each with its company news from Exa."""
+    info = cache.get_ticker_info(ticker)
+    company_name = (info.name if info else None) or ticker
+    moves = _to_moves(daily_returns)
+    news = await asyncio.gather(
+        *(_search_company_news(company_name, ticker, move.date) for move in moves)
+    )
+    return [
+        MajorMove(**move.model_dump(), news=articles)
+        for move, articles in zip(moves, news, strict=True)
+    ]
+
+
+async def _search_company_news(company_name: str, ticker: str, move_date: date) -> list[Article]:
+    """Company news around `move_date`. News is optional, so any Exa failure gives no articles."""
+    query = exa_service.build_query(NewsTier.COMPANY, company_name, ticker, industry=None)
+    try:
+        return await exa_service.search_news(
+            query,
+            start=move_date - timedelta(days=NEWS_DAYS_BEFORE),
+            end=move_date + timedelta(days=NEWS_DAYS_AFTER),
+        )
+    except Exception:
+        logger.warning("Exa news search failed for %s on %s", ticker, move_date, exc_info=True)
+        return []
 
 
 def _cache_history(ticker: str, history: pd.DataFrame, start: date, end: date) -> None:
