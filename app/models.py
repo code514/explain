@@ -27,7 +27,8 @@ class Ticker(SQLModel, table=True):
 
 
 class Price(SQLModel, table=True):
-    """One adjusted daily OHLCV bar. All values are null on days without trading."""
+    """One adjusted daily OHLCV bar plus its daily return. All values are null on days without
+    trading, and `daily_return` is also null on the first day of a stored range."""
 
     __tablename__ = "prices"  # type: ignore[assignment]
 
@@ -38,3 +39,4 @@ class Price(SQLModel, table=True):
     low: float | None = None
     close: float | None = None
     volume: int | None = None
+    daily_return: float | None = None

@@ -2,8 +2,11 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
+from sqlmodel import Session, col, select
 
 from app.controllers import tickers
+from app.db import get_engine
+from app.models import Price
 from app.schemas import TickerInfo
 from app.services import cache
 from app.services import yfinance as yf_service
@@ -160,13 +163,15 @@ async def test_get_moves_caches_a_contiguous_range_with_nulls_for_missing_days(
 
     response = await tickers.get_moves("NVDA", date(2025, 3, 7), date(2025, 3, 10))
 
-    cached = cache.get_ticker_history(
-        "NVDA", date(2025, 3, 7) - tickers.PREVIOUS_CLOSE_LOOKBACK, date(2025, 3, 10)
-    )
-    assert cached is not None
-    assert list(cached.index) == list(pd.date_range("2025-02-28", "2025-03-10"))
-    assert cached["close"].isna().to_list()[:2] == [True, True]  # no data before 03-07
-    assert cached.loc["2025-03-08":"2025-03-09", "close"].isna().all()  # the weekend
+    with Session(get_engine()) as session:
+        rows = session.exec(
+            select(Price).where(Price.ticker == "NVDA").order_by(col(Price.date))
+        ).all()
+    assert [row.date for row in rows] == [
+        d.date() for d in pd.date_range("2025-02-28", "2025-03-10")
+    ]
+    assert [row.close for row in rows if row.date.weekday() >= 5] == [None, None, None, None]
+    assert [row.close for row in rows if row.date.isoformat() == "2025-03-07"] == [100.0]
     # 03-07 has no previous close in the data, so only Monday has a return, measured from Friday.
     assert [move.date for move in response.moves] == [date(2025, 3, 10)]
     assert response.moves[0].daily_return == pytest.approx(0.10)

@@ -13,6 +13,8 @@ from app.models import Price, Ticker
 from app.schemas import TickerInfo
 from app.services.yfinance import HISTORY_COLUMNS
 
+PRICE_COLUMNS = [*HISTORY_COLUMNS, "daily_return"]
+
 
 def get_ticker_info(symbol: str) -> TickerInfo | None:
     """Cached company metadata, or None if it was never saved."""
@@ -31,7 +33,11 @@ def save_ticker_info(info: TickerInfo, now: dt.datetime) -> None:
 
 
 def get_ticker_history(symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame | None:
-    """Cached daily prices from `start` to `end` inclusive, shaped like `yf_service.get_history`.
+    """Cached daily prices from `start` to `end` inclusive, shaped like `yf_service.get_history`
+    plus a `daily_return` column.
+
+    Like Yahoo's, the frame holds trading days only: the null rows stored for weekends and
+    holidays are dropped. It can be empty on a hit, e.g. for a range with no trading days.
 
     Cache hit detection is rudimentary: it is a hit when both `start` and `end` have a
     stored row, and then every day between them is assumed stored too. That holds because
@@ -46,14 +52,16 @@ def get_ticker_history(symbol: str, start: dt.date, end: dt.date) -> pd.DataFram
             .where(Price.ticker == symbol, col(Price.date) >= start, col(Price.date) <= end)
             .order_by(col(Price.date))
         ).all()
-    return pd.DataFrame(
-        {column: [getattr(row, column) for row in rows] for column in HISTORY_COLUMNS},
+    history = pd.DataFrame(
+        {column: [getattr(row, column) for row in rows] for column in PRICE_COLUMNS},
         index=pd.DatetimeIndex([row.date for row in rows], name="date").astype("datetime64[ns]"),
     )
+    return history.dropna(how="all")  # back to Yahoo's shape: trading days only
 
 
 def save_ticker_history(symbol: str, history: pd.DataFrame) -> None:
-    """Insert or overwrite one row per day of `history`, which should be contiguous.
+    """Insert or overwrite one row per day of `history`, which needs a `daily_return` column and
+    should be contiguous.
 
     Null values are stored as nulls. Gaps in `history` would later be returned as cache hits
     with missing days, so callers fill them first.
@@ -70,6 +78,7 @@ def save_ticker_history(symbol: str, history: pd.DataFrame) -> None:
                     low=_float_or_none(bar["low"]),
                     close=_float_or_none(bar["close"]),
                     volume=None if pd.isna(bar["volume"]) else int(bar["volume"]),
+                    daily_return=_float_or_none(bar["daily_return"]),
                 )
             )
         session.commit()

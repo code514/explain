@@ -19,6 +19,7 @@ def _history(*days: str) -> pd.DataFrame:
             "low": 1.0,
             "close": [1.75 + i for i in range(len(days))],
             "volume": [100 + i for i in range(len(days))],
+            "daily_return": [0.01 * i for i in range(len(days))],
         },
         index=pd.DatetimeIndex(days, name="date").astype("datetime64[ns]"),
     )
@@ -47,7 +48,7 @@ def test_history_round_trips_in_yfinance_format() -> None:
     loaded = cache.get_ticker_history("NVDA", dt.date(2025, 3, 3), dt.date(2025, 3, 5))
 
     assert loaded is not None
-    assert list(loaded.columns) == HISTORY_COLUMNS
+    assert list(loaded.columns) == [*HISTORY_COLUMNS, "daily_return"]
     assert loaded.index.name == "date"
     assert_frame_equal(loaded, saved, check_dtype=False, check_freq=False)
 
@@ -74,7 +75,7 @@ def test_history_miss_returns_none(start: dt.date, end: dt.date) -> None:
     assert cache.get_ticker_history("NVDA", start, end) is None
 
 
-def test_history_nulls_round_trip() -> None:
+def test_history_drops_null_days_on_read() -> None:
     saved = _history("2025-03-07", "2025-03-08", "2025-03-09", "2025-03-10")
     saved.loc[["2025-03-08", "2025-03-09"]] = float("nan")  # a weekend
     cache.save_ticker_history("NVDA", saved)
@@ -82,7 +83,23 @@ def test_history_nulls_round_trip() -> None:
     loaded = cache.get_ticker_history("NVDA", dt.date(2025, 3, 7), dt.date(2025, 3, 10))
 
     assert loaded is not None
-    assert_frame_equal(loaded, saved, check_dtype=False, check_freq=False)
+    assert_frame_equal(
+        loaded,
+        saved.drop(pd.to_datetime(["2025-03-08", "2025-03-09"])),
+        check_dtype=False,
+        check_freq=False,
+    )
+
+
+def test_history_with_only_null_days_is_a_hit_with_an_empty_frame() -> None:
+    saved = _history("2025-03-08", "2025-03-09").astype(float)
+    saved[:] = float("nan")
+    cache.save_ticker_history("NVDA", saved)
+
+    loaded = cache.get_ticker_history("NVDA", dt.date(2025, 3, 8), dt.date(2025, 3, 9))
+
+    assert loaded is not None
+    assert loaded.empty
 
 
 def test_history_is_per_ticker() -> None:
