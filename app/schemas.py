@@ -19,8 +19,9 @@ class Move(BaseModel):
     daily_return: float = Field(description="Close-to-close return as a fraction, 0.032 = +3.2%")
 
 
-class MovesResponse(BaseModel):
-    ticker: str
-    start: dt.date
-    end: dt.date
+class TickerResponse(BaseModel):
     moves: list[Move]
+    major_moves: list[Move] = Field(
+        serialization_alias="majorMoves",
+        description="The 10 days with the biggest absolute daily return, biggest first",
+    )

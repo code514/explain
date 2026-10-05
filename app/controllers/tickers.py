@@ -4,7 +4,7 @@ from typing import cast
 import pandas as pd
 
 from app.domain import stocks
-from app.schemas import Move, MovesResponse
+from app.schemas import Move, TickerResponse
 from app.services import cache
 from app.services import yfinance as yf_service
 
@@ -23,7 +23,7 @@ class InvalidDateRangeError(Exception):
     """The start date is after the end date."""
 
 
-async def get_moves(ticker: str, start: date | None, end: date | None) -> MovesResponse:
+async def get_ticker(ticker: str, start: date | None, end: date | None) -> TickerResponse:
     """`end` defaults to yesterday and `start` to a year before `end`.
 
     Today and the future are never fetched or cached: today's bar isn't final, and a cached null
@@ -47,9 +47,10 @@ async def get_moves(ticker: str, start: date | None, end: date | None) -> MovesR
     if history.empty:
         raise TickerNotFoundError(ticker)
     # The lookback rows only supply the first previous close.
-    daily_returns = history["daily_return"].loc[pd.Timestamp(start) :].dropna()
-    moves = _to_moves(daily_returns)
-    return MovesResponse(ticker=ticker, start=start, end=end, moves=moves)
+    requested = history.loc[pd.Timestamp(start) :]
+    moves = _to_moves(cast(pd.Series, requested["daily_return"]).dropna())
+    major_moves = _to_moves(stocks.find_major_moves(requested))
+    return TickerResponse(moves=moves, major_moves=major_moves)
 
 
 async def _ensure_ticker_info(ticker: str) -> None:

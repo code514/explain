@@ -35,7 +35,7 @@ def _history(*days: str, closes: list[float] | None = None) -> pd.DataFrame:
     )
 
 
-async def test_get_moves_fetches_prices_for_uppercased_ticker(
+async def test_get_ticker_fetches_prices_for_uppercased_ticker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, date, date]] = []
@@ -46,23 +46,23 @@ async def test_get_moves_fetches_prices_for_uppercased_ticker(
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    response = await tickers.get_moves("nvda", date(2025, 3, 1), date(2025, 3, 5))
+    response = await tickers.get_ticker("nvda", date(2025, 3, 1), date(2025, 3, 5))
 
     assert calls == [("NVDA", date(2025, 3, 1) - tickers.PREVIOUS_CLOSE_LOOKBACK, date(2025, 3, 5))]
-    assert response.ticker == "NVDA"
+    assert response.moves == []
 
 
-async def test_get_moves_unknown_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_unknown_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
     async def no_data(ticker: str, start: date, end: date) -> pd.DataFrame:
         return _history()
 
     monkeypatch.setattr(yf_service, "get_history", no_data)
 
     with pytest.raises(tickers.TickerNotFoundError):
-        await tickers.get_moves("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
+        await tickers.get_ticker("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
 
 
-async def test_get_moves_defaults_to_the_last_year(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_defaults_to_the_last_year(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, date, date]] = []
 
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -71,36 +71,39 @@ async def test_get_moves_defaults_to_the_last_year(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    response = await tickers.get_moves("NVDA", None, None)
+    await tickers.get_ticker("NVDA", None, None)
 
     yesterday = date.today() - timedelta(days=1)
-    assert response.end == yesterday
-    assert response.start == yesterday - tickers.DEFAULT_RANGE
-    assert calls == [("NVDA", response.start - tickers.PREVIOUS_CLOSE_LOOKBACK, response.end)]
+    start = yesterday - tickers.DEFAULT_RANGE
+    assert calls == [("NVDA", start - tickers.PREVIOUS_CLOSE_LOOKBACK, yesterday)]
 
 
-async def test_get_moves_start_defaults_relative_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_start_defaults_relative_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, date, date]] = []
+
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        calls.append((ticker, start, end))
         return _history("2025-03-03")
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    response = await tickers.get_moves("NVDA", None, date(2025, 3, 5))
+    await tickers.get_ticker("NVDA", None, date(2025, 3, 5))
 
-    assert response.start == date(2025, 3, 5) - tickers.DEFAULT_RANGE
+    start = date(2025, 3, 5) - tickers.DEFAULT_RANGE
+    assert calls == [("NVDA", start - tickers.PREVIOUS_CLOSE_LOOKBACK, date(2025, 3, 5))]
 
 
-async def test_get_moves_rejects_inverted_range() -> None:
+async def test_get_ticker_rejects_inverted_range() -> None:
     with pytest.raises(tickers.InvalidDateRangeError):
-        await tickers.get_moves("NVDA", date(2025, 3, 5), date(2025, 3, 1))
+        await tickers.get_ticker("NVDA", date(2025, 3, 5), date(2025, 3, 1))
 
 
-async def test_get_moves_rejects_start_in_the_future() -> None:
+async def test_get_ticker_rejects_start_in_the_future() -> None:
     with pytest.raises(tickers.InvalidDateRangeError):
-        await tickers.get_moves("NVDA", date.today() + timedelta(days=1), None)
+        await tickers.get_ticker("NVDA", date.today() + timedelta(days=1), None)
 
 
-async def test_get_moves_reports_daily_returns_from_the_first_requested_day(
+async def test_get_ticker_reports_daily_returns_from_the_first_requested_day(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -109,14 +112,14 @@ async def test_get_moves_reports_daily_returns_from_the_first_requested_day(
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    response = await tickers.get_moves("NVDA", date(2025, 3, 3), date(2025, 3, 4))
+    response = await tickers.get_ticker("NVDA", date(2025, 3, 3), date(2025, 3, 4))
 
     assert [move.date for move in response.moves] == [date(2025, 3, 3), date(2025, 3, 4)]
     assert response.moves[0].daily_return == pytest.approx(0.03)
     assert response.moves[1].daily_return == pytest.approx(98 / 103 - 1)
 
 
-async def test_get_moves_fetches_and_caches_info_once(
+async def test_get_ticker_fetches_and_caches_info_once(
     monkeypatch: pytest.MonkeyPatch, stub_info: list[str]
 ) -> None:
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -124,14 +127,14 @@ async def test_get_moves_fetches_and_caches_info_once(
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    await tickers.get_moves("nvda", date(2025, 3, 1), date(2025, 3, 5))
-    await tickers.get_moves("nvda", date(2025, 3, 1), date(2025, 3, 5))
+    await tickers.get_ticker("nvda", date(2025, 3, 1), date(2025, 3, 5))
+    await tickers.get_ticker("nvda", date(2025, 3, 1), date(2025, 3, 5))
 
     assert stub_info == ["NVDA"]
     assert cache.get_ticker_info("NVDA") == TickerInfo(symbol="NVDA", name="Test Corp")
 
 
-async def test_get_moves_uses_cached_history_on_second_call(
+async def test_get_ticker_uses_cached_history_on_second_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, date, date]] = []
@@ -145,14 +148,14 @@ async def test_get_moves_uses_cached_history_on_second_call(
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    first = await tickers.get_moves("NVDA", date(2025, 3, 3), date(2025, 3, 4))
-    second = await tickers.get_moves("NVDA", date(2025, 3, 3), date(2025, 3, 4))
+    first = await tickers.get_ticker("NVDA", date(2025, 3, 3), date(2025, 3, 4))
+    second = await tickers.get_ticker("NVDA", date(2025, 3, 3), date(2025, 3, 4))
 
     assert len(calls) == 1
     assert second == first
 
 
-async def test_get_moves_caches_a_contiguous_range_with_nulls_for_missing_days(
+async def test_get_ticker_caches_a_contiguous_range_with_nulls_for_missing_days(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -161,7 +164,7 @@ async def test_get_moves_caches_a_contiguous_range_with_nulls_for_missing_days(
 
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
-    response = await tickers.get_moves("NVDA", date(2025, 3, 7), date(2025, 3, 10))
+    response = await tickers.get_ticker("NVDA", date(2025, 3, 7), date(2025, 3, 10))
 
     with Session(get_engine()) as session:
         rows = session.exec(
@@ -177,7 +180,7 @@ async def test_get_moves_caches_a_contiguous_range_with_nulls_for_missing_days(
     assert response.moves[0].daily_return == pytest.approx(0.10)
 
 
-async def test_get_moves_on_a_weekend_range_hits_the_cache_on_the_second_call(
+async def test_get_ticker_on_a_weekend_range_hits_the_cache_on_the_second_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, date, date]] = []
@@ -189,13 +192,13 @@ async def test_get_moves_on_a_weekend_range_hits_the_cache_on_the_second_call(
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
 
     # Both `start` and `end` fall on a weekend, so neither is a trading day.
-    await tickers.get_moves("NVDA", date(2025, 3, 8), date(2025, 3, 9))
-    await tickers.get_moves("NVDA", date(2025, 3, 8), date(2025, 3, 9))
+    await tickers.get_ticker("NVDA", date(2025, 3, 8), date(2025, 3, 9))
+    await tickers.get_ticker("NVDA", date(2025, 3, 8), date(2025, 3, 9))
 
     assert len(calls) == 1
 
 
-async def test_get_moves_does_not_cache_an_unknown_ticker(
+async def test_get_ticker_does_not_cache_an_unknown_ticker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def no_data(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -204,13 +207,13 @@ async def test_get_moves_does_not_cache_an_unknown_ticker(
     monkeypatch.setattr(yf_service, "get_history", no_data)
 
     with pytest.raises(tickers.TickerNotFoundError):
-        await tickers.get_moves("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
+        await tickers.get_ticker("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
 
     start = date(2025, 3, 1) - tickers.PREVIOUS_CLOSE_LOOKBACK
     assert cache.get_ticker_history("BOGUS", start, date(2025, 3, 5)) is None
 
 
-async def test_get_moves_clamps_end_to_yesterday(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_clamps_end_to_yesterday(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, date, date]] = []
 
     async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -220,22 +223,21 @@ async def test_get_moves_clamps_end_to_yesterday(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(yf_service, "get_history", fake_get_history)
     yesterday = date.today() - timedelta(days=1)
 
-    response = await tickers.get_moves("NVDA", yesterday - timedelta(days=5), date.today())
-    future = await tickers.get_moves(
-        "NVDA", yesterday - timedelta(days=5), date.today() + timedelta(days=30)
-    )
+    start = yesterday - timedelta(days=5)
 
-    assert response.end == yesterday
-    assert future.end == yesterday
-    assert all(end == yesterday for _, _, end in calls)
+    await tickers.get_ticker("NVDA", start, date.today())
+    await tickers.get_ticker("NVDA", start, date.today() + timedelta(days=30))
+
+    # Both ranges clamp to the same one, so the second is a cache hit.
+    assert calls == [("NVDA", start - tickers.PREVIOUS_CLOSE_LOOKBACK, yesterday)]
 
 
-async def test_get_moves_rejects_start_today(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_rejects_start_today(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(tickers.InvalidDateRangeError):
-        await tickers.get_moves("NVDA", date.today(), None)
+        await tickers.get_ticker("NVDA", date.today(), None)
 
 
-async def test_get_moves_unknown_ticker_by_info(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_ticker_unknown_ticker_by_info(monkeypatch: pytest.MonkeyPatch) -> None:
     async def unknown(ticker: str) -> TickerInfo:
         raise yf_service.UnknownTickerError(ticker)
 
@@ -246,6 +248,43 @@ async def test_get_moves_unknown_ticker_by_info(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(yf_service, "get_history", fail_get_history)
 
     with pytest.raises(tickers.TickerNotFoundError):
-        await tickers.get_moves("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
+        await tickers.get_ticker("BOGUS", date(2025, 3, 1), date(2025, 3, 5))
 
     assert cache.get_ticker_info("BOGUS") is None
+
+
+async def test_get_ticker_reports_the_biggest_moves_in_range_biggest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        # Thu is the lookback row: its -50% (vs Wed) is outside the requested range.
+        return _history(
+            "2025-02-26",
+            "2025-02-27",
+            "2025-02-28",
+            "2025-03-03",
+            "2025-03-04",
+            closes=[100.0, 50.0, 51.0, 53.55, 50.0],
+        )
+
+    monkeypatch.setattr(yf_service, "get_history", fake_get_history)
+
+    response = await tickers.get_ticker("NVDA", date(2025, 3, 3), date(2025, 3, 4))
+
+    assert [move.date for move in response.moves] == [date(2025, 3, 3), date(2025, 3, 4)]
+    assert [move.date for move in response.major_moves] == [date(2025, 3, 4), date(2025, 3, 3)]
+    assert response.major_moves[0].daily_return == pytest.approx(50 / 53.55 - 1)
+
+
+async def test_get_ticker_limits_major_moves_to_ten(monkeypatch: pytest.MonkeyPatch) -> None:
+    days = [d.date().isoformat() for d in pd.date_range("2025-03-01", periods=16)]
+
+    async def fake_get_history(ticker: str, start: date, end: date) -> pd.DataFrame:
+        return _history(*days, closes=[100.0 + i * i for i in range(16)])
+
+    monkeypatch.setattr(yf_service, "get_history", fake_get_history)
+
+    response = await tickers.get_ticker("NVDA", date(2025, 3, 2), date(2025, 3, 16))
+
+    assert len(response.moves) == 15
+    assert len(response.major_moves) == 10
